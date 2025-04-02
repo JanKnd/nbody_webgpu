@@ -12,6 +12,18 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ScaleUniform {
+    value: [f32; 2],
+}
+
+impl ScaleUniform {
+    fn update(&mut self, size: &winit::dpi::PhysicalSize<u32>) {
+        self.value = [0.5 / (size.width as f32 / size.height as f32), 0.5];
+    }
+}
+
 struct State<'a> {
     surface: wgpu::Surface<'a>,
     device: wgpu::Device,
@@ -20,6 +32,9 @@ struct State<'a> {
     size: winit::dpi::PhysicalSize<u32>,
     window: &'a Window,
 
+    scale_uniform: ScaleUniform,
+    scale_buffer: wgpu::Buffer,
+    scale_bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
@@ -95,6 +110,47 @@ impl<'a> State<'a> {
 
         let num_indices = vertex::INDICES.len() as u32;
 
+        let mut scale_uniform = ScaleUniform {
+            value: [0.5 / (size.width as f32 / size.height as f32), 0.5]
+        };
+
+        let scale_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Scale Buffer"),
+                contents: bytemuck::cast_slice(&[scale_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+        let scale_bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("scale_bind_group_layout")
+            }
+        );
+
+        let scale_bind_group = device.create_bind_group( &wgpu::BindGroupDescriptor {
+            layout: &scale_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: scale_buffer.as_entire_binding(),
+                }
+            ],
+            label: Some("scale_bind_group")
+        });
+
         // Rendering
         // ------------------------------------------------------------------------------------------------------
         // ------------------------------------------------------------------------------------------------------
@@ -109,7 +165,7 @@ impl<'a> State<'a> {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&scale_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -159,6 +215,9 @@ impl<'a> State<'a> {
             size,
             window,
 
+            scale_uniform,
+            scale_buffer,
+            scale_bind_group,
             vertex_buffer,
             index_buffer,
             num_indices,
@@ -176,6 +235,8 @@ impl<'a> State<'a> {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            self.scale_uniform.update(&self.size);
+            self.queue.write_buffer(&self.scale_buffer, 0, bytemuck::cast_slice(&[self.scale_uniform]));
         }
     }
 
@@ -219,6 +280,7 @@ impl<'a> State<'a> {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.scale_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.num_indices, 0,0..1);
