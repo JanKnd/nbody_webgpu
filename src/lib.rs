@@ -1,6 +1,8 @@
 use std::iter;
 
-use wgpu::{core::device::queue, PipelineCompilationOptions, Surface};
+mod lightning;
+
+use wgpu::{core::device::queue, util::DeviceExt, BindGroup, BufferUsages, PipelineCompilationOptions, Surface};
 use winit::{
     dpi::PhysicalSize,
     event::*,
@@ -8,6 +10,14 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowBuilder},
 };
+use bytemuck::{self, bytes_of};
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SceneUniform {
+    width: u32,
+    height: u32,
+}
 
 struct State<'a> {
     surface: wgpu::Surface<'a>,
@@ -17,6 +27,10 @@ struct State<'a> {
     size: winit::dpi::PhysicalSize<u32>,
     window: &'a Window,
 
+    scene_uniform: SceneUniform,
+    scene_buffer: wgpu::Buffer,
+    lightning_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
     render_pipeline: wgpu::RenderPipeline,
 }
 
@@ -76,12 +90,66 @@ impl<'a> State<'a> {
             view_formats: vec![],
         };
 
+        let scene_uniform = SceneUniform {
+            width: size.width,
+            height: size.height,
+        };
+
+        let lightning_data = lightning::Lightning::lightning_vec(3000);
+
+        let scene_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_buffer"),
+            contents: bytemuck::cast_slice(&[scene_uniform]),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+
+        let lightning_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lightning_buffer"),
+            contents: bytemuck::cast_slice(&lightning_data[..]),
+            usage: BufferUsages::STORAGE,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+            label: Some("camera_bind_group_layout"),
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bing_group 0"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: scene_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: lightning_buffer.as_entire_binding(),
+                },
+            ]
+        });
+
         let shader = device.create_shader_module(wgpu::include_wgsl!("draw.wgsl"));
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("render_pipeline_layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[
+                    &bind_group_layout,
+                ],
                 push_constant_ranges: &[],
             });
 
@@ -131,6 +199,10 @@ impl<'a> State<'a> {
             size,
             window,
 
+            scene_uniform,
+            scene_buffer,
+            lightning_buffer,
+            bind_group,
             render_pipeline,
         }
     }
@@ -145,6 +217,9 @@ impl<'a> State<'a> {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+            self.scene_uniform = SceneUniform{width: self.size.width, height: self.size.height };
+
+            self.queue.write_buffer(&self.scene_buffer, 0,bytemuck::cast_slice(&[self.scene_uniform]));
         }
     }
 
@@ -188,6 +263,7 @@ impl<'a> State<'a> {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         }
 
